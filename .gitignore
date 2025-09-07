@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Virtual environments
+.venv/
+virtualenv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+temp/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Sensitive or user-specific files
+*.env
+*.secret
+*.key
+*.pem
+
+# Data files not meant for version control
+*.xlsx
+*.csv
+*.json
+*.parquet
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+*.whl
+*.tar.gz
+
+# Testing and coverage
+.coverage
+coverage.xml
+*.cover
+*.cache
+pytest_cache/
