@@ -81,8 +81,9 @@ with st.sidebar:
         - Set Initial Equity, Risk-Free Rate (e.g., USDT staking rate), Chart Timeframe (hours per bar).
         - Filter by date range or use presets.
         - Explore tabs: Overview (metrics), Trades (details), Performance (PnL bars), Risk (VaR), Visuals (equity curve), Advanced Analytics (anomalies, Monte Carlo).
-        - Export PDF/CSV from Advanced Analytics.
-        Contact: support@ahmedscryptoholdings.com
+        - Click 'Generate' in Monte Carlo to refresh simulations.
+        - Export PDF/CSV/Excel from Advanced Analytics.
+        Contact: zozquant@gmail.com
         """)
     uploaded_file = st.file_uploader("Upload TradingView Excel", type=["xlsx"])
     initial_equity = st.number_input("Initial Equity", value=10000.0, step=1000.0, min_value=1.0, key="initial_equity")
@@ -132,7 +133,6 @@ with st.sidebar:
             st.stop()
 
 # Modular Functions
-@st.cache_data
 def excel_serial_to_datetime(value):
     if pd.isna(value):
         return pd.NaT
@@ -160,7 +160,7 @@ def process_trades(df, default_symbol, timeframe_hours):
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         st.error(f"Missing columns: {', '.join(missing_cols)}. Ensure Excel has 'List of trades' sheet with required format.")
-        st.info("Tip: Check for alternate names like 'Trade ID' or 'Time'. Contact support@ahmedscryptoholdings.com.")
+        st.info("Tip: Check for alternate names like 'Trade ID' or 'Time'. Contact zozquant@gmail.com.")
         return pd.DataFrame()
     if 'Symbol' not in df.columns:
         st.info(f"No Symbol column found. Using default: {default_symbol}. For multi-asset analysis, include Symbol.")
@@ -219,102 +219,94 @@ def process_trades(df, default_symbol, timeframe_hours):
     return trades_df
 
 @st.cache_data
-def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, df=None):
+def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0):
     """
-    Compute portfolio performance metrics.
-
-    Parameters
-    ----------
-    closed_df : pd.DataFrame
-        Closed trades with columns: ['pnl','return_pct','entry_price','exit_price',
-        'position_size','exit_date','entry_date','cumulative_pnl','bars','trade_num']
-    initial_equity : float
-        Starting account balance.
-    risk_free_rate : float, default=0.0
-        Annualized risk-free rate (e.g. 0.02 for 2%).
-    df : pd.DataFrame, optional
-        Full trades log (used for open PnL).
+    Compute portfolio performance metrics. Fixed open_pnl and removed unused df parameter.
     """
-    # Handle edge case: no trades
-    if closed_df.empty or len(closed_df[closed_df['is_open'] == False]) < 2:
+    closed_trades = closed_df[~closed_df['is_open']].copy()
+    if closed_trades.empty or len(closed_trades) < 2:
         return {key: "N/A" for key in ['net_profit', 'max_drawdown', 'sharpe_ratio', 'sortino_ratio', 'calmar_ratio',
                                        'var_95', 'cvar_95', 'max_runup', 'gross_profit', 'gross_loss', 'profit_factor',
                                        'total_trades', 'winning_trades', 'losing_trades', 'percent_profitable', 'avg_pnl',
                                        'avg_win', 'avg_loss', 'win_loss_ratio', 'avg_bars', 'avg_bars_win', 'avg_bars_loss',
                                        'largest_win', 'largest_loss', 'largest_win_pct', 'largest_loss_pct',
                                        'margin_calls', 'open_pnl', 'total_open_trades',
-                                       'longest_drawdown', 'time_to_recovery', 'returns_skew', 'returns_kurtosis']}, pd.Series([initial_equity]), pd.Series(), pd.DataFrame({'PYRUSDT': pd.Series(dtype=float)})
+                                       'longest_drawdown', 'time_to_recovery', 'returns_skew', 'returns_kurtosis']}, pd.Series([initial_equity]), pd.Series(), pd.Series()
 
-    # Keep only closed trades with valid data
-    closed_df = closed_df[closed_df['is_open'] == False].copy()
-    closed_df = closed_df.dropna(
-        subset=['pnl','return_pct','entry_price','exit_price',
-                'position_size','exit_date','cumulative_pnl'])
+    closed_trades = closed_trades.dropna(
+        subset=['pnl', 'return_pct', 'entry_price', 'exit_price', 'position_size', 'exit_date', 'entry_date', 'cumulative_pnl'])
 
-    # Build equity curve (true account equity)
-    equity_curve = initial_equity + closed_df['cumulative_pnl']
-    equity_curve.index = closed_df['exit_date']
+    equity_curve = initial_equity + closed_trades['cumulative_pnl']
+    equity_curve.index = closed_trades['exit_date']
 
-    # Daily equity series
     daily_equity = equity_curve.resample("D").last().ffill()
     daily_returns = daily_equity.pct_change().dropna()
 
-    # Per-trade returns
-    per_trade_returns = closed_df['return_pct'] / 100.0
+    per_trade_returns = closed_trades['return_pct'] / 100.0
     log_returns = np.log1p(per_trade_returns)
 
-    # Annualization
-    total_days = (closed_df['exit_date'].max() - closed_df['entry_date'].min()).days
-    trades_per_year = len(closed_df) / (total_days / 365.25) if total_days > 0 else 1
+    total_days = (closed_trades['exit_date'].max() - closed_trades['entry_date'].min()).days
+    trades_per_year = len(closed_trades) / (total_days / 365.25) if total_days > 0 else 1
     annualization_factor_trades = np.sqrt(trades_per_year)
 
-    # Daily Sharpe/Sortino
     mean_return = daily_returns.mean()
     std_return = daily_returns.std(ddof=0) or 1e-9
     downside_std = daily_returns[daily_returns < 0].std(ddof=0) or 1e-9
     sharpe_ratio = ((mean_return - risk_free_rate/252) / std_return) * np.sqrt(252) if std_return else "N/A"
     sortino_ratio = ((mean_return - risk_free_rate/252) / downside_std) * np.sqrt(252) if downside_std else "N/A"
 
-    # Profitability metrics
-    net_profit = closed_df['pnl'].sum()
-    gross_profit = closed_df.loc[closed_df['pnl'] > 0, 'pnl'].sum()
-    gross_loss = abs(closed_df.loc[closed_df['pnl'] < 0, 'pnl'].sum())
+    net_profit = closed_trades['pnl'].sum()
+    gross_profit = closed_trades.loc[closed_trades['pnl'] > 0, 'pnl'].sum()
+    gross_loss = abs(closed_trades.loc[closed_trades['pnl'] < 0, 'pnl'].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.nan
-    percent_profitable = (closed_df['pnl'] > 0).mean() * 100
-    avg_pnl = closed_df['pnl'].mean()
-    avg_win = closed_df.loc[closed_df['pnl'] > 0, 'pnl'].mean()
-    avg_loss = abs(closed_df.loc[closed_df['pnl'] < 0, 'pnl'].mean())
+    percent_profitable = (closed_trades['pnl'] > 0).mean() * 100
+    avg_pnl = closed_trades['pnl'].mean()
+    avg_win = closed_trades.loc[closed_trades['pnl'] > 0, 'pnl'].mean()
+    avg_loss = abs(closed_trades.loc[closed_trades['pnl'] < 0, 'pnl'].mean())
     win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else np.nan
 
-    # Risk metrics
     high_water = daily_equity.cummax()
     drawdowns = (high_water - daily_equity) / high_water
     max_drawdown = drawdowns.max() * 100
-    drawdown_periods = (drawdowns > 0).astype(int)
-    longest_drawdown = (drawdown_periods.groupby((drawdown_periods != drawdown_periods.shift()).cumsum())
-                        .cumsum().max())
+    drawdown_starts = (drawdowns > 0) & (drawdowns.shift() <= 0)
+    drawdown_ends = (drawdowns <= 0) & (drawdowns.shift() > 0)
+    longest_drawdown = 0
+    time_to_recovery = 0
+    if len(daily_equity) > 1:
+        in_drawdown = False
+        current_dd_days = 0
+        current_recovery_days = 0
+        for i in range(1, len(daily_equity)):
+            if drawdowns.iloc[i] > 0:
+                if not in_drawdown:
+                    in_drawdown = True
+                    current_dd_days = 1
+                else:
+                    current_dd_days += 1
+                current_recovery_days = 0
+            else:
+                if in_drawdown:
+                    in_drawdown = False
+                    time_to_recovery = max(time_to_recovery, current_recovery_days)
+                    current_recovery_days = 1
+                else:
+                    current_recovery_days += 1
+            longest_drawdown = max(longest_drawdown, current_dd_days)
     max_runup = (daily_equity - daily_equity.cummin()).max()
 
-    # Distribution metrics
     returns_skew = per_trade_returns.skew()
     returns_kurtosis = per_trade_returns.kurtosis()
 
-    # Tail risk
     var_95 = norm.ppf(0.05, mean_return, std_return) * np.sqrt(252) * 100 if std_return else "N/A"
     cvar_95 = (mean_return - std_return * norm.pdf(norm.ppf(0.05)) / 0.05) * np.sqrt(252) * 100 if std_return else "N/A"
 
-    # Annual return (CAGR)
     annual_return = (equity_curve.iloc[-1] / initial_equity) ** (365.25/total_days) - 1 if total_days > 0 else np.nan
     calmar = annual_return / (max_drawdown/100) if max_drawdown > 0 else np.nan
 
-    # Other metrics
     margin_calls = (daily_equity < 0.1 * initial_equity).sum() if len(daily_equity) > 1 else 0
-    open_pnl = 0.0
-    total_open_trades = 0
-    if df is not None:
-        open_df = df[df['Type'].str.lower().str.contains('entry', na=False) & ~df['Trade #'].isin(closed_df['trade_num'])]
-        open_pnl = open_df['Net P&L USDT'].sum() if not open_df.empty else 0.0
-        total_open_trades = open_df['Trade #'].nunique()
+    open_trades = closed_df[closed_df['is_open']]
+    open_pnl = open_trades['pnl'].sum() if not open_trades.empty else 0.0
+    total_open_trades = len(open_trades)
 
     metrics = {
         'net_profit': float(net_profit) if not np.isnan(net_profit) else "N/A",
@@ -328,34 +320,37 @@ def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, df=None):
         'gross_profit': float(gross_profit) if not np.isnan(gross_profit) else "N/A",
         'gross_loss': float(gross_loss) if not np.isnan(gross_loss) else "N/A",
         'profit_factor': float(profit_factor) if not np.isnan(profit_factor) else "N/A",
-        'total_trades': int(len(closed_df)),
-        'winning_trades': int((closed_df['pnl'] > 0).sum()),
-        'losing_trades': int((closed_df['pnl'] < 0).sum()),
+        'total_trades': int(len(closed_trades)),
+        'winning_trades': int((closed_trades['pnl'] > 0).sum()),
+        'losing_trades': int((closed_trades['pnl'] < 0).sum()),
         'percent_profitable': float(percent_profitable) if not np.isnan(percent_profitable) else "N/A",
         'avg_pnl': float(avg_pnl) if not np.isnan(avg_pnl) else "N/A",
         'avg_win': float(avg_win) if not np.isnan(avg_win) else "N/A",
         'avg_loss': float(avg_loss) if not np.isnan(avg_loss) else "N/A",
         'win_loss_ratio': float(win_loss_ratio) if not np.isnan(win_loss_ratio) else "N/A",
-        'avg_bars': float(closed_df['bars'].mean()) if not closed_df['bars'].empty else "N/A",
-        'avg_bars_win': float(closed_df.loc[closed_df['pnl'] > 0, 'bars'].mean()) if not closed_df[closed_df['pnl'] > 0].empty else "N/A",
-        'avg_bars_loss': float(closed_df.loc[closed_df['pnl'] < 0, 'bars'].mean()) if not closed_df[closed_df['pnl'] < 0].empty else "N/A",
-        'largest_win': float(closed_df['pnl'].max()) if not closed_df['pnl'].empty else "N/A",
-        'largest_loss': float(abs(closed_df['pnl'].min())) if not closed_df['pnl'].empty else "N/A",
-        'largest_win_pct': float(closed_df['return_pct'].max()) if not closed_df.empty else "N/A",
-        'largest_loss_pct': float(abs(closed_df['return_pct'].min())) if not closed_df.empty else "N/A",
+        'avg_bars': float(closed_trades['bars'].mean()) if not closed_trades['bars'].empty else "N/A",
+        'avg_bars_win': float(closed_trades.loc[closed_trades['pnl'] > 0, 'bars'].mean()) if not closed_trades[closed_trades['pnl'] > 0].empty else "N/A",
+        'avg_bars_loss': float(closed_trades.loc[closed_trades['pnl'] < 0, 'bars'].mean()) if not closed_trades[closed_trades['pnl'] < 0].empty else "N/A",
+        'largest_win': float(closed_trades['pnl'].max()) if not closed_trades['pnl'].empty else "N/A",
+        'largest_loss': float(abs(closed_trades['pnl'].min())) if not closed_trades['pnl'].empty else "N/A",
+        'largest_win_pct': float(closed_trades['return_pct'].max()) if not closed_trades.empty else "N/A",
+        'largest_loss_pct': float(abs(closed_trades['return_pct'].min())) if not closed_trades.empty else "N/A",
         'margin_calls': int(margin_calls),
         'open_pnl': float(open_pnl) if not np.isnan(open_pnl) else "N/A",
         'total_open_trades': int(total_open_trades),
         'longest_drawdown': int(longest_drawdown) if not np.isnan(longest_drawdown) else 0,
-        'time_to_recovery': int(longest_drawdown) if not np.isnan(longest_drawdown) else 0,
+        'time_to_recovery': int(time_to_recovery) if not np.isnan(time_to_recovery) else 0,
         'returns_skew': float(returns_skew) if not np.isnan(returns_skew) else "N/A",
         'returns_kurtosis': float(returns_kurtosis) if not np.isnan(returns_kurtosis) else "N/A"
     }
 
     return metrics, equity_curve, log_returns, daily_returns
 
-@st.cache_data
 def monte_carlo_simulation(daily_returns, initial_equity, start_date, sim_type='t', n_simulations=1000, horizon=252, df=5):
+    """
+    Simulate Monte Carlo equity paths with Student's t or historical bootstrap.
+    Note: No caching to ensure fresh random simulations each time.
+    """
     if daily_returns.empty or daily_returns.std() == 0:
         return np.array([initial_equity] * horizon * n_simulations).reshape(horizon, n_simulations)
     if sim_type == 't':
@@ -369,16 +364,17 @@ def monte_carlo_simulation(daily_returns, initial_equity, start_date, sim_type='
 
 @st.cache_data
 def detect_anomalies(closed_df, contamination=0.02):
-    if len(closed_df) < 10:
+    closed_only = closed_df[~closed_df['is_open']].copy()
+    if len(closed_only) < 10:
         return pd.DataFrame()
-    features = closed_df[['pnl', 'bars', 'position_size', 'mfe', 'mae']].dropna()
+    features = closed_only[['pnl', 'bars', 'position_size', 'mfe', 'mae']].dropna()
     if len(features) < 10:
         return pd.DataFrame()
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(features)
     iso = IsolationForest(contamination=contamination, random_state=42)
     anomalies = iso.fit_predict(features_scaled)
-    result = closed_df.iloc[features.index][anomalies == -1].copy()
+    result = closed_only.iloc[features.index][anomalies == -1].copy()
     result['anomaly_type'] = result.apply(
         lambda x: 'Lucky Win' if x['pnl'] > 0 and x['mae'] > 0.8 * abs(x['pnl']) else 'Poor Exit' if x['pnl'] > 0 and x['mfe'] > 1.5 * x['pnl'] else 'Outlier', axis=1)
     return result
@@ -401,10 +397,10 @@ def generate_ai_summary(anomalies, metrics):
     return "\n".join(summary) if summary else "No critical issues detected."
 
 @st.cache_data
-def compute_correlation(closed_df):
-    if len(closed_df['symbol'].unique()) < 2:
+def compute_correlation(filtered_df):
+    if len(filtered_df['symbol'].unique()) < 2:
         return None
-    pivot = closed_df.pivot(index='exit_date', columns='symbol', values='pnl').dropna()
+    pivot = filtered_df[~filtered_df['is_open']].pivot(index='exit_date', columns='symbol', values='pnl').dropna()
     if pivot.shape[0] < 2:
         return None
     corr = pivot.corr()
@@ -419,7 +415,7 @@ def optimize_allocation(returns_dict):
     if len(valid_returns) < 2:
         return {sym: 1 / len(symbols) for sym in symbols}
     symbols = list(valid_returns.keys())
-    returns_df = pd.DataFrame([valid_returns[sym] for sym in symbols]).T.dropna()
+    returns_df = pd.DataFrame({sym: valid_returns[sym] for sym in symbols}).T.dropna()
     if returns_df.shape[0] < 2:
         return {sym: 1 / len(symbols) for sym in symbols}
     cov_matrix = returns_df.cov()
@@ -439,9 +435,11 @@ def optimize_allocation(returns_dict):
     return dict(zip(symbols, result.x))
 
 @st.cache_data
-def hierarchical_risk_parity(daily_returns):
-    if daily_returns.shape[1] < 2:
-        return {col: 1.0 for col in daily_returns.columns}
+def hierarchical_risk_parity(daily_returns, symbols):
+    if len(symbols) < 2 or (isinstance(daily_returns, pd.Series) and daily_returns.shape[0] < 2) or (isinstance(daily_returns, pd.DataFrame) and daily_returns.shape[1] < 2):
+        return {sym: 1.0 / len(symbols) for sym in symbols}
+    if isinstance(daily_returns, pd.Series):
+        daily_returns = pd.DataFrame({symbols[0]: daily_returns})
     cov = daily_returns.cov() * 252
     corr = daily_returns.corr()
     distance = np.sqrt((1 - corr) / 2)
@@ -453,17 +451,16 @@ def hierarchical_risk_parity(daily_returns):
         weights = np.zeros(len(sort_idx))
         left_cluster = sort_idx[:len(sort_idx) // 2]
         right_cluster = sort_idx[len(sort_idx) // 2:]
-        left_var = np.sqrt(np.dot(np.ones(len(left_cluster)), np.dot(cov.loc[left_cluster, left_cluster], np.ones(len(left_cluster)))))
-        right_var = np.sqrt(np.dot(np.ones(len(right_cluster)), np.dot(cov.loc[right_cluster, right_cluster], np.ones(len(right_cluster)))))
+        left_var = np.sqrt(np.dot(np.ones(len(left_cluster)), np.dot(cov.iloc[left_cluster, left_cluster], np.ones(len(left_cluster)))))
+        right_var = np.sqrt(np.dot(np.ones(len(right_cluster)), np.dot(cov.iloc[right_cluster, right_cluster], np.ones(len(right_cluster)))))
         alloc_factor = 1 - left_var / (left_var + right_var) if (left_var + right_var) else 0.5
         weights[left_cluster] = alloc_factor * get_rec_bipart(cov, left_cluster)
         weights[right_cluster] = (1 - alloc_factor) * get_rec_bipart(cov, right_cluster)
         return weights
 
     sorted_idx = sch.leaves_list(linkage)
-    symbols = daily_returns.columns
     weights = get_rec_bipart(cov, sorted_idx)
-    return dict(zip(symbols, weights))
+    return dict(zip(daily_returns.columns, weights))
 
 # Main Logic
 if uploaded_file:
@@ -478,11 +475,11 @@ if uploaded_file:
             st.warning("No trades in selected date range. Try expanding dates or uploading a larger dataset.")
         else:
             symbols = filtered_df['symbol'].unique()
-            symbol_returns = {sym: filtered_df[filtered_df['symbol'] == sym]['pnl'] / filtered_df[filtered_df['symbol'] == sym]['position_size'] for sym in symbols}
-            portfolio_metrics, equity, log_returns, daily_returns = compute_metrics(filtered_df, initial_equity, risk_free_rate, df)
+            symbol_returns = {sym: filtered_df[filtered_df['symbol'] == sym]['pnl'] / filtered_df[filtered_df['symbol'] == sym]['position_size'] for sym in symbols if not filtered_df[filtered_df['symbol'] == sym].empty}
+            portfolio_metrics, equity, log_returns, daily_returns = compute_metrics(filtered_df, initial_equity, risk_free_rate)
             corr_matrix = compute_correlation(filtered_df)
             sharpe_alloc = optimize_allocation(symbol_returns)
-            hrp_alloc = hierarchical_risk_parity(pd.DataFrame(daily_returns, columns=[default_symbol])) if not daily_returns.empty else {symbols[0]: 1.0}
+            hrp_alloc = hierarchical_risk_parity(daily_returns, symbols)
 
             # Tabs
             tab_overview, tab_trades, tab_performance, tab_risk, tab_visuals, tab_ai = st.tabs(
@@ -531,15 +528,18 @@ if uploaded_file:
                     cols = st.columns([1, 1, 1], gap="small")
                     for j, (key, value) in enumerate(metrics_list[i:i + 3]):
                         with cols[j]:
-                            if key not in ['sharpe_ratio_tv', 'sortino_ratio_tv', 'alpha', 'buy_hold_return']:  # Skip removed metrics
-                                display_value = (f"{value:.2f}%" if key in ['var_95', 'cvar_95', 'max_drawdown',
-                                                                           'percent_profitable', 'largest_win_pct',
-                                                                           'largest_loss_pct', 'returns_skew', 'returns_kurtosis']
-                                                 else f"{value:,.2f}" if isinstance(value, float) and value != "N/A" and key in ['net_profit', 'max_runup', 'gross_profit', 'gross_loss', 'avg_pnl', 'avg_win', 'avg_loss', 'largest_win', 'largest_loss', 'open_pnl']
-                                                 else str(value))
-                                st.markdown(
-                                    f'<div class="metric-card" title="{tooltips.get(key, "")}"><div class="metric-title">{key.replace("_", " ").title()}</div><div class="metric-value">{display_value}</div></div>',
-                                    unsafe_allow_html=True)
+                            if isinstance(value, (int, float)):
+                                if key in ['var_95', 'cvar_95', 'max_drawdown', 'percent_profitable', 'largest_win_pct', 'largest_loss_pct', 'returns_skew', 'returns_kurtosis']:
+                                    display_value = f"{value:.2f}%"
+                                elif key in ['net_profit', 'max_runup', 'gross_profit', 'gross_loss', 'avg_pnl', 'avg_win', 'avg_loss', 'largest_win', 'largest_loss', 'open_pnl']:
+                                    display_value = f"{value:,.2f}"
+                                else:
+                                    display_value = f"{value:.2f}"
+                            else:
+                                display_value = str(value)
+                            st.markdown(
+                                f'<div class="metric-card" title="{tooltips.get(key, "")}"><div class="metric-title">{key.replace("_", " ").title()}</div><div class="metric-value">{display_value}</div></div>',
+                                unsafe_allow_html=True)
 
             with tab_trades:
                 st.dataframe(filtered_df[['trade_num', 'symbol', 'entry_date', 'exit_date', 'pnl', 'bars', 'mfe', 'mae', 'is_open']])
@@ -550,7 +550,7 @@ if uploaded_file:
                                      color_continuous_scale='RdYlGn')
                     fig_pnl.update_layout(plot_bgcolor='#0A0F1A', paper_bgcolor='#0A0F1A', font=dict(color='#E0E7FF'))
                     st.plotly_chart(fig_pnl, use_container_width=True)
-                    fig_bars = px.histogram(filtered_df, x='bars', title='Trade Duration Distribution (Bars)', nbins=50)
+                    fig_bars = px.histogram(filtered_df[~filtered_df['is_open']], x='bars', title='Trade Duration Distribution (Bars)', nbins=50)
                     fig_bars.update_layout(plot_bgcolor='#0A0F1A', paper_bgcolor='#0A0F1A', font=dict(color='#E0E7FF'))
                     st.plotly_chart(fig_bars, use_container_width=True)
                 except Exception as e:
@@ -558,19 +558,22 @@ if uploaded_file:
 
             with tab_risk:
                 try:
-                    if corr_matrix is not None:
+                    if corr_matrix is not None and not corr_matrix.empty:
                         fig_corr = go.Figure(
                             data=go.Heatmap(z=corr_matrix.values, x=corr_matrix.columns, y=corr_matrix.index,
                                             colorscale='Plasma', text=corr_matrix.values.round(2), texttemplate="%{text}"))
                         fig_corr.update_layout(title='Correlation Matrix', plot_bgcolor='#0A0F1A', paper_bgcolor='#0A0F1A',
                                                font=dict(color='#E0E7FF'))
                         st.plotly_chart(fig_corr, use_container_width=True)
-                    st.markdown(
-                        f'<div class="metric-card" title="Value at Risk at 95% confidence (daily, annualized %)"><div class="metric-title">Value at Risk (95%)</div><div class="metric-value">{portfolio_metrics.get("var_95", "N/A"):.2f}%</div></div>',
-                        unsafe_allow_html=True)
-                    st.markdown(
-                        f'<div class="metric-card" title="Conditional VaR at 95% confidence (daily, annualized %)"><div class="metric-title">Conditional VaR (95%)</div><div class="metric-value">{portfolio_metrics.get("cvar_95", "N/A"):.2f}%</div></div>',
-                        unsafe_allow_html=True)
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(
+                            f'<div class="metric-card" title="Value at Risk at 95% confidence (daily, annualized %)"><div class="metric-title">Value at Risk (95%)</div><div class="metric-value">{portfolio_metrics.get("var_95", "N/A"):.2f}%</div></div>',
+                            unsafe_allow_html=True)
+                    with col2:
+                        st.markdown(
+                            f'<div class="metric-card" title="Conditional VaR at 95% confidence (daily, annualized %)"><div class="metric-title">Conditional VaR (95%)</div><div class="metric-value">{portfolio_metrics.get("cvar_95", "N/A"):.2f}%</div></div>',
+                            unsafe_allow_html=True)
                 except Exception as e:
                     st.warning(f"Failed to render risk charts: {str(e)}")
 
@@ -591,10 +594,10 @@ if uploaded_file:
                     st.plotly_chart(fig_underwater, use_container_width=True)
 
                     rolling_window = 30
-                    rolling_returns = daily_returns.rolling(window=rolling_window).mean() * 252
-                    rolling_std = daily_returns.rolling(window=rolling_window).std() * np.sqrt(252)
-                    rolling_sharpe = (rolling_returns - risk_free_rate / 252) / rolling_std if not daily_returns.empty else pd.DataFrame()
-                    if not rolling_sharpe.empty:
+                    if not daily_returns.empty:
+                        rolling_returns = daily_returns.rolling(window=rolling_window).mean() * 252
+                        rolling_std = daily_returns.rolling(window=rolling_window).std() * np.sqrt(252)
+                        rolling_sharpe = (rolling_returns - risk_free_rate) / rolling_std
                         fig_rolling = go.Figure(
                             go.Scatter(x=rolling_sharpe.index, y=rolling_sharpe, mode='lines',
                                        line=dict(color='#536DFE')))
@@ -603,15 +606,20 @@ if uploaded_file:
                                                   paper_bgcolor='#0A0F1A', font=dict(color='#E0E7FF'))
                         st.plotly_chart(fig_rolling, use_container_width=True)
 
-                    if not daily_returns.empty:
-                        monthly_returns = daily_returns.resample('ME').sum()
-                        monthly_returns.index = monthly_returns.index.strftime('%Y-%m')
-                        fig_heatmap = go.Figure(
-                            data=go.Heatmap(z=monthly_returns.values, x=[default_symbol], y=monthly_returns.index,
-                                            colorscale='RdYlGn', text=monthly_returns.values.round(2),
-                                            texttemplate="%{text}%"))
-                        fig_heatmap.update_layout(title='Monthly Returns Heatmap', xaxis_title='Symbol',
-                                                  yaxis_title='Year-Month', plot_bgcolor='#0A0F1A', paper_bgcolor='#0A0F1A',
+                        if len(symbols) > 1:
+                            monthly_returns = daily_returns.resample('ME').apply(lambda x: x.mean() * 21)
+                            fig_heatmap = go.Figure(data=go.Heatmap(z=monthly_returns.values.T, x=monthly_returns.index.strftime('%Y-%m'), y=monthly_returns.columns,
+                                                                    colorscale='RdYlGn', text=[[f"{val:.2f}%" for val in row] for row in monthly_returns.values.T],
+                                                                    texttemplate="%{text}", textfont={"size":10}))
+                        else:
+                            monthly_returns = daily_returns.resample('ME').sum()
+                            monthly_returns.index = monthly_returns.index.strftime('%Y-%m')
+                            fig_heatmap = go.Figure(
+                                data=go.Heatmap(z=monthly_returns.values.reshape(-1, 1), x=[symbols[0]], y=monthly_returns.index,
+                                                colorscale='RdYlGn', text=monthly_returns.values.round(2).reshape(-1, 1),
+                                                texttemplate="%{text}%"))
+                        fig_heatmap.update_layout(title='Monthly Returns Heatmap', xaxis_title='Year-Month',
+                                                  yaxis_title='Symbol', plot_bgcolor='#0A0F1A', paper_bgcolor='#0A0F1A',
                                                   font=dict(color='#E0E7FF'))
                         st.plotly_chart(fig_heatmap, use_container_width=True)
 
@@ -624,20 +632,29 @@ if uploaded_file:
 
             with tab_ai:
                 st.header("Advanced Analytics")
-                anomalies = detect_anomalies(filtered_df[filtered_df['is_open'] == False], anomaly_contamination)
+                anomalies = detect_anomalies(filtered_df, anomaly_contamination)
                 ai_summary = generate_ai_summary(anomalies, portfolio_metrics)
                 st.markdown(f"**AI Insights Summary**\n\n{ai_summary}", unsafe_allow_html=True)
 
                 with st.expander("Monte Carlo Simulations"):
                     sim_type = st.selectbox("Simulation Type", ["Student's t", "Historical"], key="sim_type")
+                    if 'monte_carlo_seed' not in st.session_state:
+                        st.session_state['monte_carlo_seed'] = np.random.randint(0, 1000000)
+                    if st.button("Generate New Simulation"):
+                        st.session_state['monte_carlo_seed'] = np.random.randint(0, 1000000)
                     try:
-                        paths = monte_carlo_simulation(daily_returns, equity.iloc[-1], filtered_df['exit_date'].max(),
-                                                       sim_type.lower())
+                        np.random.seed(st.session_state['monte_carlo_seed'])
+                        paths = monte_carlo_simulation(daily_returns, equity.iloc[-1] if len(equity) > 0 else initial_equity, filtered_df['exit_date'].max(),
+                                                       sim_type.lower().replace("'s t", "t"))
                         fig_mc = go.Figure()
                         dates = pd.date_range(start=filtered_df['exit_date'].max(), periods=252, freq='B')
+                        # Plot all 1000 paths; warning: may be slow for large n_simulations
                         for path in paths.T:
                             fig_mc.add_trace(go.Scatter(x=dates, y=path, mode='lines',
                                                         line=dict(width=0.5, color='rgba(83, 109, 254, 0.3)')))
+                        median_path = np.median(paths, axis=1)
+                        fig_mc.add_trace(go.Scatter(x=dates, y=median_path, mode='lines', name='Median',
+                                                    line=dict(width=2, color='#FF6B6B')))
                         fig_mc.update_layout(title=f'Monte Carlo Equity Paths ({sim_type}, 252 Days)', xaxis_title='Date',
                                              yaxis_title='Equity ($)', plot_bgcolor='#0A0F1A', paper_bgcolor='#0A0F1A',
                                              font=dict(color='#E0E7FF'))
@@ -646,11 +663,14 @@ if uploaded_file:
                         st.warning(f"Failed to render Monte Carlo simulation: {str(e)}")
 
                 with st.expander("Anomaly Detection"):
-                    st.dataframe(anomalies[['trade_num', 'symbol', 'pnl', 'bars', 'mfe', 'mae', 'anomaly_type']])
+                    if not anomalies.empty:
+                        st.dataframe(anomalies[['trade_num', 'symbol', 'pnl', 'bars', 'mfe', 'mae', 'anomaly_type']])
+                    else:
+                        st.info("No anomalies detected with current sensitivity.")
 
                 with st.expander("Portfolio Allocation"):
-                    st.write("Sharpe-Optimized Allocation:", sharpe_alloc)
-                    st.write("Hierarchical Risk Parity Allocation:", hrp_alloc)
+                    st.write("**Sharpe-Optimized Allocation:**", sharpe_alloc)
+                    st.write("**Hierarchical Risk Parity Allocation:**", hrp_alloc)
 
                 st.subheader("Export Reports")
                 try:
@@ -662,12 +682,12 @@ if uploaded_file:
                                Paragraph(ai_summary.replace('\n', '<br />'), styles['Normal']),
                                Paragraph("<br />", styles['Normal'])]
                     data = [['Metric', 'Value']] + [[key.replace('_', ' ').title(),
-                                                    f"{value:.2f}%" if key in ['var_95', 'cvar_95', 'max_drawdown',
-                                                                               'percent_profitable', 'largest_win_pct',
-                                                                               'largest_loss_pct', 'returns_skew', 'returns_kurtosis']
-                                                    else f"{value:,.2f}" if isinstance(value, float) and value != "N/A" and key in ['net_profit', 'max_runup', 'gross_profit', 'gross_loss', 'avg_pnl', 'avg_win', 'avg_loss', 'largest_win', 'largest_loss', 'open_pnl']
+                                                    f"{value:.2f}%" if isinstance(value, (int, float)) and key in ['var_95', 'cvar_95', 'max_drawdown',
+                                                                                                                 'percent_profitable', 'largest_win_pct',
+                                                                                                                 'largest_loss_pct', 'returns_skew', 'returns_kurtosis']
+                                                    else f"{value:,.2f}" if isinstance(value, (int, float)) and key in ['net_profit', 'max_runup', 'gross_profit', 'gross_loss', 'avg_pnl', 'avg_win', 'avg_loss', 'largest_win', 'largest_loss', 'open_pnl']
                                                     else str(value)]
-                                                   for key, value in portfolio_metrics.items() if key not in ['sharpe_ratio_tv', 'sortino_ratio_tv', 'alpha', 'buy_hold_return']]
+                                                   for key, value in portfolio_metrics.items()]
                     table = Table(data)
                     table.setStyle(TableStyle([
                         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1A237E')),
@@ -686,9 +706,26 @@ if uploaded_file:
                     doc.build(elements)
                     st.download_button("Download PDF Report", buffer.getvalue(), "portfolio_report.pdf",
                                       mime="application/pdf")
-                    st.download_button("Export Trades CSV", filtered_df.to_csv(index=False), "trades.csv")
+                    st.download_button("Export Trades CSV", filtered_df.to_csv(index=False).encode('utf-8'), "trades.csv", "text/csv")
+
+                    # Excel Report
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        metrics_df = pd.DataFrame(list(portfolio_metrics.items()), columns=['Metric', 'Value'])
+                        metrics_df.to_excel(writer, sheet_name='Metrics', index=False)
+                        filtered_df.to_excel(writer, sheet_name='Trades', index=False)
+                        if not anomalies.empty:
+                            anomalies.to_excel(writer, sheet_name='Anomalies', index=False)
+                        alloc_df = pd.DataFrame({
+                            'Type': ['Sharpe-Optimized', 'Hierarchical Risk Parity'],
+                            'Allocation': [str(sharpe_alloc), str(hrp_alloc)]
+                        })
+                        alloc_df.to_excel(writer, sheet_name='Allocations', index=False)
+                        summary_df = pd.DataFrame({'AI Insights': [ai_summary]})
+                        summary_df.to_excel(writer, sheet_name='AI_Summary', index=False)
+                    st.download_button("Download Excel Report", buffer.getvalue(), "portfolio_report.xlsx",
+                                      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e:
                     st.warning(f"Failed to generate report: {str(e)}")
-
 else:
     st.info("Upload a TradingView Excel file to activate the dashboard. Sample format: trades.xlsx with 'List of trades' sheet.")
