@@ -133,6 +133,7 @@ with st.sidebar:
             st.stop()
 
 # Modular Functions
+@st.cache_data
 def excel_serial_to_datetime(value):
     if pd.isna(value):
         return pd.NaT
@@ -221,7 +222,7 @@ def process_trades(df, default_symbol, timeframe_hours):
 @st.cache_data
 def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0):
     """
-    Compute portfolio performance metrics. Fixed open_pnl and removed unused df parameter.
+    Compute portfolio performance metrics. Fixed open_pnl and drawdown calculations.
     """
     closed_trades = closed_df[~closed_df['is_open']].copy()
     if closed_trades.empty or len(closed_trades) < 2:
@@ -346,7 +347,7 @@ def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0):
 
     return metrics, equity_curve, log_returns, daily_returns
 
-def monte_carlo_simulation(daily_returns, initial_equity, start_date, sim_type='t', n_simulations=1000, horizon=252, df=5):
+def monte_carlo_simulation(daily_returns, initial_equity, start_date, sim_type='t', n_simulations=100, horizon=252, df=5):
     """
     Simulate Monte Carlo equity paths with Student's t or historical bootstrap.
     Note: No caching to ensure fresh random simulations each time.
@@ -464,12 +465,12 @@ def hierarchical_risk_parity(daily_returns, symbols):
 
 # Main Logic
 if uploaded_file:
-    closed_df = process_trades(df, default_symbol, timeframe_hours)
-    st.session_state['closed_df'] = closed_df
+    processed_df = process_trades(df, default_symbol, timeframe_hours)
+    st.session_state['processed_df'] = processed_df
     st.session_state['filter_date'] = None
-    if not closed_df.empty:
-        closed = closed_df[~closed_df['is_open']]
-        opens = closed_df[closed_df['is_open'] & (closed_df['entry_date'].dt.date >= start_date)]
+    if not processed_df.empty:
+        closed = processed_df[~processed_df['is_open']]
+        opens = processed_df[processed_df['is_open'] & (processed_df['entry_date'].dt.date >= start_date)]
         filtered_df = pd.concat([closed[(closed['entry_date'].dt.date >= start_date) & (closed['exit_date'].dt.date <= end_date)], opens])
         if filtered_df.empty:
             st.warning("No trades in selected date range. Try expanding dates or uploading a larger dataset.")
@@ -638,18 +639,20 @@ if uploaded_file:
 
                 with st.expander("Monte Carlo Simulations"):
                     sim_type = st.selectbox("Simulation Type", ["Student's t", "Historical"], key="sim_type")
+                    n_simulations = st.slider("Number of Simulations", 50, 1000, 100, step=50, key="n_simulations")
                     if 'monte_carlo_seed' not in st.session_state:
                         st.session_state['monte_carlo_seed'] = np.random.randint(0, 1000000)
                     if st.button("Generate New Simulation"):
                         st.session_state['monte_carlo_seed'] = np.random.randint(0, 1000000)
+                    plot_placeholder = st.empty()
                     try:
                         np.random.seed(st.session_state['monte_carlo_seed'])
                         paths = monte_carlo_simulation(daily_returns, equity.iloc[-1] if len(equity) > 0 else initial_equity, filtered_df['exit_date'].max(),
-                                                       sim_type.lower().replace("'s t", "t"))
+                                                       sim_type.lower().replace("'s t", "t"), n_simulations=n_simulations)
                         fig_mc = go.Figure()
                         dates = pd.date_range(start=filtered_df['exit_date'].max(), periods=252, freq='B')
-                        # Plot all 1000 paths; warning: may be slow for large n_simulations
-                        for path in paths.T:
+                        # Plot up to n_simulations paths (default 100 for performance)
+                        for path in paths.T[:n_simulations]:
                             fig_mc.add_trace(go.Scatter(x=dates, y=path, mode='lines',
                                                         line=dict(width=0.5, color='rgba(83, 109, 254, 0.3)')))
                         median_path = np.median(paths, axis=1)
@@ -657,8 +660,9 @@ if uploaded_file:
                                                     line=dict(width=2, color='#FF6B6B')))
                         fig_mc.update_layout(title=f'Monte Carlo Equity Paths ({sim_type}, 252 Days)', xaxis_title='Date',
                                              yaxis_title='Equity ($)', plot_bgcolor='#0A0F1A', paper_bgcolor='#0A0F1A',
-                                             font=dict(color='#E0E7FF'))
-                        st.plotly_chart(fig_mc, use_container_width=True)
+                                             font=dict(color='#E0E7FF'), height=600, autosize=True)
+                        with plot_placeholder:
+                            st.plotly_chart(fig_mc, use_container_width=True, config={'responsive': True})
                     except Exception as e:
                         st.warning(f"Failed to render Monte Carlo simulation: {str(e)}")
 
@@ -708,7 +712,6 @@ if uploaded_file:
                                       mime="application/pdf")
                     st.download_button("Export Trades CSV", filtered_df.to_csv(index=False).encode('utf-8'), "trades.csv", "text/csv")
 
-                    # Excel Report
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                         metrics_df = pd.DataFrame(list(portfolio_metrics.items()), columns=['Metric', 'Value'])
