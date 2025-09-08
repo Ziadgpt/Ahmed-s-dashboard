@@ -100,4 +100,4 @@ Display Issues: Use a compatible browser (Chrome, Firefox recommended) and check
 Performance: Large datasets may require caching optimization; contact support for assistance.
 
 Contact
-For questions or support, email: support@ahmedscryptoholdings.com.# Ahmed-s-dashboard
+For questions or support, email: zozQuant@gmail.com.# Ahmed-s-dashboard

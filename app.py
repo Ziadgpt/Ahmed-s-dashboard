@@ -78,7 +78,7 @@ with st.sidebar:
         st.markdown("""
         **Ahmed's Crypto Holdings**
         - Upload TradingView Excel ('List of trades' sheet).
-        - Set Initial Equity (~$10,000 for typical crypto trades), Risk-Free Rate (e.g., 2% for USDT staking), Chart Timeframe (e.g., 0.88 hours for ~11 bars/trade).
+        - Set Initial Equity, Risk-Free Rate (e.g., USDT staking rate), Chart Timeframe (hours per bar).
         - Filter by date range or use presets.
         - Explore tabs: Overview (metrics), Trades (details), Performance (PnL bars), Risk (VaR), Visuals (equity curve), Advanced Analytics (anomalies, Monte Carlo).
         - Export PDF/CSV from Advanced Analytics.
@@ -219,7 +219,7 @@ def process_trades(df, default_symbol, timeframe_hours):
     return trades_df
 
 @st.cache_data
-def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, benchmark_returns=None, df=None):
+def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, df=None):
     """
     Compute portfolio performance metrics.
 
@@ -232,8 +232,6 @@ def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, benchmark_ret
         Starting account balance.
     risk_free_rate : float, default=0.0
         Annualized risk-free rate (e.g. 0.02 for 2%).
-    benchmark_returns : pd.Series, optional
-        Benchmark daily returns for alpha calculation.
     df : pd.DataFrame, optional
         Full trades log (used for open PnL).
     """
@@ -244,9 +242,8 @@ def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, benchmark_ret
                                        'total_trades', 'winning_trades', 'losing_trades', 'percent_profitable', 'avg_pnl',
                                        'avg_win', 'avg_loss', 'win_loss_ratio', 'avg_bars', 'avg_bars_win', 'avg_bars_loss',
                                        'largest_win', 'largest_loss', 'largest_win_pct', 'largest_loss_pct',
-                                       'buy_hold_return', 'margin_calls', 'open_pnl', 'total_open_trades',
-                                       'longest_drawdown', 'time_to_recovery', 'returns_skew', 'returns_kurtosis',
-                                       'alpha']}, pd.Series([initial_equity]), pd.Series(), pd.DataFrame({'PYRUSDT': pd.Series(dtype=float)})
+                                       'margin_calls', 'open_pnl', 'total_open_trades',
+                                       'longest_drawdown', 'time_to_recovery', 'returns_skew', 'returns_kurtosis']}, pd.Series([initial_equity]), pd.Series(), pd.DataFrame({'PYRUSDT': pd.Series(dtype=float)})
 
     # Keep only closed trades with valid data
     closed_df = closed_df[closed_df['is_open'] == False].copy()
@@ -310,14 +307,7 @@ def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, benchmark_ret
     annual_return = (equity_curve.iloc[-1] / initial_equity) ** (365.25/total_days) - 1 if total_days > 0 else np.nan
     calmar = annual_return / (max_drawdown/100) if max_drawdown > 0 else np.nan
 
-    # Benchmark alpha
-    alpha = np.nan
-    if benchmark_returns is not None and not benchmark_returns.empty:
-        aligned = daily_returns.align(benchmark_returns, join="inner")[0]
-        alpha = daily_returns.mean()*252 - benchmark_returns.mean()*252 if not aligned.empty else np.nan
-
     # Other metrics
-    buy_hold_return = (closed_df['exit_price'].iloc[-1] / closed_df['entry_price'].iloc[0] - 1) * 100 if not closed_df.empty and closed_df['entry_price'].iloc[0] != 0 else 0
     margin_calls = (daily_equity < 0.1 * initial_equity).sum() if len(daily_equity) > 1 else 0
     open_pnl = 0.0
     total_open_trades = 0
@@ -353,15 +343,13 @@ def compute_metrics(closed_df, initial_equity, risk_free_rate=0.0, benchmark_ret
         'largest_loss': float(abs(closed_df['pnl'].min())) if not closed_df['pnl'].empty else "N/A",
         'largest_win_pct': float(closed_df['return_pct'].max()) if not closed_df.empty else "N/A",
         'largest_loss_pct': float(abs(closed_df['return_pct'].min())) if not closed_df.empty else "N/A",
-        'buy_hold_return': float(buy_hold_return) if not np.isnan(buy_hold_return) else "N/A",
         'margin_calls': int(margin_calls),
         'open_pnl': float(open_pnl) if not np.isnan(open_pnl) else "N/A",
         'total_open_trades': int(total_open_trades),
         'longest_drawdown': int(longest_drawdown) if not np.isnan(longest_drawdown) else 0,
         'time_to_recovery': int(longest_drawdown) if not np.isnan(longest_drawdown) else 0,
         'returns_skew': float(returns_skew) if not np.isnan(returns_skew) else "N/A",
-        'returns_kurtosis': float(returns_kurtosis) if not np.isnan(returns_kurtosis) else "N/A",
-        'alpha': float(alpha) if not np.isnan(alpha) else "N/A"
+        'returns_kurtosis': float(returns_kurtosis) if not np.isnan(returns_kurtosis) else "N/A"
     }
 
     return metrics, equity_curve, log_returns, daily_returns
@@ -491,7 +479,7 @@ if uploaded_file:
         else:
             symbols = filtered_df['symbol'].unique()
             symbol_returns = {sym: filtered_df[filtered_df['symbol'] == sym]['pnl'] / filtered_df[filtered_df['symbol'] == sym]['position_size'] for sym in symbols}
-            portfolio_metrics, equity, log_returns, daily_returns = compute_metrics(filtered_df, initial_equity, risk_free_rate, None, df)
+            portfolio_metrics, equity, log_returns, daily_returns = compute_metrics(filtered_df, initial_equity, risk_free_rate, df)
             corr_matrix = compute_correlation(filtered_df)
             sharpe_alloc = optimize_allocation(symbol_returns)
             hrp_alloc = hierarchical_risk_parity(pd.DataFrame(daily_returns, columns=[default_symbol])) if not daily_returns.empty else {symbols[0]: 1.0}
@@ -530,26 +518,23 @@ if uploaded_file:
                     'largest_loss': 'Largest loss from a single trade',
                     'largest_win_pct': 'Largest profit as a percentage',
                     'largest_loss_pct': 'Largest loss as a percentage',
-                    'buy_hold_return': 'Return of holding asset from first to last trade (%)',
                     'margin_calls': 'Times equity fell below 10% of initial equity',
                     'open_pnl': 'Unrealized profit/loss of open trades',
                     'total_open_trades': 'Number of open trades',
                     'longest_drawdown': 'Longest drawdown period (days)',
                     'time_to_recovery': 'Longest recovery time (days)',
                     'returns_skew': 'Skewness of trade returns',
-                    'returns_kurtosis': 'Kurtosis of trade returns',
-                    'alpha': 'Excess return over BTC benchmark (10% annualized)'
+                    'returns_kurtosis': 'Kurtosis of trade returns'
                 }
                 metrics_list = list(portfolio_metrics.items())
                 for i in range(0, len(metrics_list), 3):
                     cols = st.columns([1, 1, 1], gap="small")
                     for j, (key, value) in enumerate(metrics_list[i:i + 3]):
                         with cols[j]:
-                            if key not in ['sharpe_ratio_tv', 'sortino_ratio_tv']:  # Skip removed metrics
+                            if key not in ['sharpe_ratio_tv', 'sortino_ratio_tv', 'alpha', 'buy_hold_return']:  # Skip removed metrics
                                 display_value = (f"{value:.2f}%" if key in ['var_95', 'cvar_95', 'max_drawdown',
                                                                            'percent_profitable', 'largest_win_pct',
-                                                                           'largest_loss_pct', 'buy_hold_return',
-                                                                           'returns_skew', 'returns_kurtosis']
+                                                                           'largest_loss_pct', 'returns_skew', 'returns_kurtosis']
                                                  else f"{value:,.2f}" if isinstance(value, float) and value != "N/A" and key in ['net_profit', 'max_runup', 'gross_profit', 'gross_loss', 'avg_pnl', 'avg_win', 'avg_loss', 'largest_win', 'largest_loss', 'open_pnl']
                                                  else str(value))
                                 st.markdown(
@@ -679,11 +664,10 @@ if uploaded_file:
                     data = [['Metric', 'Value']] + [[key.replace('_', ' ').title(),
                                                     f"{value:.2f}%" if key in ['var_95', 'cvar_95', 'max_drawdown',
                                                                                'percent_profitable', 'largest_win_pct',
-                                                                               'largest_loss_pct', 'buy_hold_return',
-                                                                               'returns_skew', 'returns_kurtosis']
+                                                                               'largest_loss_pct', 'returns_skew', 'returns_kurtosis']
                                                     else f"{value:,.2f}" if isinstance(value, float) and value != "N/A" and key in ['net_profit', 'max_runup', 'gross_profit', 'gross_loss', 'avg_pnl', 'avg_win', 'avg_loss', 'largest_win', 'largest_loss', 'open_pnl']
                                                     else str(value)]
-                                                   for key, value in portfolio_metrics.items() if key not in ['sharpe_ratio_tv', 'sortino_ratio_tv']]
+                                                   for key, value in portfolio_metrics.items() if key not in ['sharpe_ratio_tv', 'sortino_ratio_tv', 'alpha', 'buy_hold_return']]
                     table = Table(data)
                     table.setStyle(TableStyle([
                         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1A237E')),
